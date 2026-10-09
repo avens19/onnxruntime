@@ -1,0 +1,91 @@
+name: Platform package proposal validation
+on:
+  push:
+    branches: ['codex/platform-native-packages-checks*']
+permissions:
+  contents: read
+jobs:
+  packaging:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+      ONNXRUNTIME_NODE_INSTALL: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Real archives and package manager selection
+        run: node --test js/node/script/pack-platforms.test.js
+      - name: Release validation tests
+        run: python -m unittest discover -s tools/ci_build/github/js -p 'test_validate_npm_packages.py' -v
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+      ONNXRUNTIME_NODE_INSTALL: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install locked JavaScript dependencies without native builds
+        run: |
+          npm ci --prefix js --ignore-scripts --no-audit --no-fund
+          npm ci --prefix js/common --ignore-scripts --no-audit --no-fund
+          npm ci --prefix js/node --ignore-scripts --no-audit --no-fund
+      - name: Compile JavaScript source and build scripts
+        run: node js/node_modules/typescript/bin/tsc --build js/common js/node/script js/node/test js/node
+      - name: TypeScript lint
+        working-directory: js
+        run: node node_modules/eslint/bin/eslint.js node/lib/binding.ts
+      - name: Format and Python lint
+        run: |
+          python -m venv /tmp/ort-lint
+          /tmp/ort-lint/bin/pip install ruff
+          /tmp/ort-lint/bin/ruff check tools/ci_build/github/js/validate-npm-packages.py tools/ci_build/github/js/test_validate_npm_packages.py --fix
+          /tmp/ort-lint/bin/ruff format tools/ci_build/github/js/validate-npm-packages.py tools/ci_build/github/js/test_validate_npm_packages.py
+          cd js
+          node node_modules/prettier/bin/prettier.cjs --write node/lib/binding.ts node/script/native-directory.js node/script/pack-platforms.js node/script/pack-platforms.test.js node/script/install.js node/README.md
+          cd ..
+          git diff > proposal-format.patch
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proposal-format
+          path: proposal-format.patch
+  inference:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+      ONNXRUNTIME_NODE_INSTALL: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: CPU inference with a matching published engine
+        run: node .github/scripts/codex-platform-smoke.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inference-${{ matrix.os }}
+          path: platform-smoke.json
